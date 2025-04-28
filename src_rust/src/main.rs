@@ -1,8 +1,10 @@
 use rayon::prelude::*;
 use serde_json::{from_str, Value};
-// use std::borrow::Cow;
 use std::io;
 use std::process::{Command, Output};
+
+// 根据设备类型尝试不同的 smartctl 参数
+const DEVICE_TYPES: [&str; 4] = ["", "ata", "sat", "nvme"]; // 空字符串代表默认模式
 
 // 解析 smartctl 输出，将硬盘信息分为厂商名和型号，并获取温度
 fn parse_smartctl_output(output: &Output) -> io::Result<(String, String, Option<i64>)> {
@@ -105,24 +107,29 @@ fn get_all_disk_devices() -> io::Result<Vec<String>> {
     Ok(devices)
 }
 
-// 获取硬盘的厂商名、型号和温度
+// 尝试为每个设备调用 smartctl 并自动切换 -d 参数
 fn get_disk_info_and_temperature(device: &str) -> io::Result<(String, String, Option<i64>)> {
-    let output = Command::new("smartctl")
-        .args(&["--json", "-a", device])
-        .output()?;
+    // 遍历支持的 DEVICE_TYPES 模式
+    for device_type in DEVICE_TYPES.iter() {
+        // 构造 smartctl 命令参数
+        let mut args = vec!["--json", "-a"];
+        if !device_type.is_empty() {
+            args.push("-d");
+            args.push(device_type);
+        }
+        args.push(device);
 
-    if !output.status.success() || output.stdout.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "smartctl command failed for {}: {}",
-                device,
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        ));
+        let output = Command::new("smartctl").args(&args).output()?;
+
+        if output.status.success() && !output.stdout.is_empty() {
+            return parse_smartctl_output(&output);
+        }
     }
 
-    parse_smartctl_output(&output)
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        format!("Failed to query SMART info for device: {}", device),
+    ))
 }
 
 // 主函数
