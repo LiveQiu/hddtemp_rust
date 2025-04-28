@@ -6,8 +6,8 @@ linker = "musl-gcc"
 rustflags = [
     "-C", "panic=abort",
     "-C", "link-arg=-lunwind",
-    "-C", "link-arg=-static" # 明确静态链接
+    "-C", "link-arg=-static"
 ]
 
 [net]
-offline = false # 是否允许离线构建
+offline = false
