@@ -1,0 +1,16 @@
+[package]
+name = "src_rust"
+version = "0.1.1"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rayon = "1.6"
+nix = "0.26"
+
+[profile.release]
+opt-level = 3       # 最大优化级别
+lto = true          # 启用链接时间优化
+codegen-units = 1   # 强化优化
+panic = "abort"     # 减少 panic 的开销

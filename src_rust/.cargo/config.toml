@@ -1,0 +1,13 @@
+[build]
+target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+rustflags = [
+    "-C", "panic=abort",
+    "-C", "link-arg=-lunwind",
+    "-C", "link-arg=-static" # 明确静态链接
+]
+
+[net]
+offline = false # 是否允许离线构建
