@@ -4,9 +4,8 @@ use std::io;
 use std::process::{Command, Output};
 
 // 根据设备类型尝试不同的 smartctl 参数
-const DEVICE_TYPES: [&str; 5] = ["", "ata", "sat", "scsi", "nvme"]; // 空字符串代表默认模式
+const DEVICE_TYPES: [&str; 6] = ["", "ata", "sat", "scsi", "nvme", "sata"]; // 增加了"sata"类型
 
-// 解析 smartctl 输出，将硬盘信息分为厂商名和型号，并获取温度
 fn parse_smartctl_output(output: &Output) -> io::Result<(String, String, Option<i64>)> {
     let output_str = String::from_utf8_lossy(&output.stdout);
 
@@ -29,31 +28,30 @@ fn parse_smartctl_output(output: &Output) -> io::Result<(String, String, Option<
         }
     };
 
-    // 提取厂商名、硬件型号或猜测值
-    let vendor = json_data["scsi_vendor"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    let product = json_data["scsi_product"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
+    // 提取厂商名 - 优先从model_family中提取（适用于SATA硬盘）
+    let vendor = if let Some(model_family) = json_data["model_family"].as_str() {
+        // 尝试从model_family中提取厂商名（通常是第一个单词）
+        model_family
+            .split_whitespace()
+            .next()
+            .unwrap_or("Unknown Vendor")
+            .to_string()
+    } else {
+        json_data["vendor"]
+            .as_str()
+            .or_else(|| json_data["scsi_vendor"].as_str())
+            .unwrap_or("Unknown Vendor")
+            .to_string()
+    };
+
+    // 提取模型名
     let model = json_data["model_name"]
         .as_str()
-        .or_else(|| json_data["model_family"].as_str())
+        .or_else(|| json_data["product"].as_str()) // 对于SATA设备可能使用product字段
+        .or_else(|| json_data["scsi_product"].as_str())
         .or_else(|| json_data["scsi_model_name"].as_str())
         .unwrap_or("Unknown Model")
-        .to_owned();
-
-    let (vendor_part, model_part) = if !vendor.is_empty() && !product.is_empty() {
-        (vendor, product)
-    } else {
-        // 尝试拆分 model 到厂商和型号两部分
-        let mut parts = model.split_whitespace();
-        let vendor_guess = parts.next().unwrap_or("Unknown Vendor").to_string();
-        let model_guess = parts.collect::<Vec<&str>>().join(" ");
-        (vendor_guess, model_guess)
-    };
+        .to_string();
 
     // 提取温度信息（按优先顺序查询可能的字段）
     let temperature = json_data["temperature"]["current"]
@@ -78,16 +76,20 @@ fn parse_smartctl_output(output: &Output) -> io::Result<(String, String, Option<
                         })
                         .next()
                 })
-        });
+        })
+        .or_else(|| json_data["sata_temperature"].as_i64()); // 添加SATA特定温度字段
 
-    Ok((vendor_part, model_part, temperature))
+    Ok((vendor, model, temperature))
 }
 
 // 从文本输出中提取温度（备用方法）
 fn extract_temperature_from_text(output: &str) -> Option<i64> {
     // 尝试匹配常见的温度格式
     for line in output.lines() {
-        if line.contains("Temperature") || line.contains("Airflow_Temperature") {
+        if line.to_lowercase().contains("temperature")
+            || line.to_lowercase().contains("airflow_temperature")
+            || line.to_lowercase().contains("temp")
+        {
             if let Some(temp) = line
                 .split_whitespace()
                 .filter_map(|word| word.parse::<i64>().ok())
@@ -140,52 +142,19 @@ fn get_all_disk_devices() -> io::Result<Vec<String>> {
 
 // 尝试为每个设备调用 smartctl 并自动切换 -d 参数
 fn get_disk_info_and_temperature(device: &str) -> io::Result<(String, String, Option<i64>)> {
-    // 遍历支持的 DEVICE_TYPES 模式
-    for device_type in DEVICE_TYPES.iter() {
-        // 构造 smartctl 命令参数
-        let mut args = vec!["--json", "-a"];
-        if !device_type.is_empty() {
-            args.push("-d");
-            args.push(device_type);
-        }
-        args.push(device);
+    // 首先尝试不带任何设备类型参数（适用于大多数SATA设备）
+    let mut args = vec!["--json", "-a", device];
+    let output = execute_smartctl(&args);
+    if let Ok(info) = parse_smartctl_output(&output) {
+        return Ok(info);
+    }
 
-        // 添加超时机制防止卡住
-        let output = match Command::new("smartctl")
-            .args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => {
-                let output = match child.wait_with_output() {
-                    Ok(output) => output,
-                    Err(e) => {
-                        eprintln!("Command execution failed for {}: {}", device, e);
-                        continue;
-                    }
-                };
-                output
-            }
-            Err(e) => {
-                eprintln!("Failed to spawn smartctl for {}: {}", device, e);
-                continue;
-            }
-        };
-
-        // 检查输出是否有效
-        if !output.stdout.is_empty() {
-            // 即使命令返回非0状态码，也尝试解析输出
-            match parse_smartctl_output(&output) {
-                Ok(info) => return Ok(info),
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse output for {} (type {}): {}",
-                        device, device_type, e
-                    );
-                    continue;
-                }
-            }
+    // 如果默认方式失败，尝试所有设备类型
+    for device_type in DEVICE_TYPES.iter().filter(|&&t| !t.is_empty()) {
+        args = vec!["--json", "-a", "-d", device_type, device];
+        let output = execute_smartctl(&args);
+        if let Ok(info) = parse_smartctl_output(&output) {
+            return Ok(info);
         }
     }
 
@@ -195,7 +164,25 @@ fn get_disk_info_and_temperature(device: &str) -> io::Result<(String, String, Op
     ))
 }
 
-// 主函数
+// 执行smartctl命令的辅助函数
+fn execute_smartctl(args: &[&str]) -> Output {
+    Command::new("smartctl")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|child| child.wait_with_output())
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to execute smartctl with args {:?}: {}", args, e);
+            Output {
+                status: std::process::ExitStatus::default(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }
+        })
+}
+
+// 主函数保持不变
 fn main() {
     // 检查是否有 root 权限
     if !nix::unistd::Uid::effective().is_root() {
