@@ -1,3 +1,7 @@
+#[macro_use] // 启用 prettytable 宏
+extern crate prettytable;
+
+use prettytable::{format, Cell, Row, Table};
 use rayon::prelude::*;
 use serde_json::{from_str, Value};
 use std::io;
@@ -160,7 +164,7 @@ fn get_disk_info_and_temperature(device: &str) -> io::Result<(String, String, Op
 
     Err(io::Error::new(
         io::ErrorKind::Other,
-        format!("All attempts failed for device: {}", device),
+        format!("Failed for device: {}", device),
     ))
 }
 
@@ -182,11 +186,11 @@ fn execute_smartctl(args: &[&str]) -> Output {
         })
 }
 
-// 主函数保持不变
+// 主函数
 fn main() {
     // 检查是否有 root 权限
     if !nix::unistd::Uid::effective().is_root() {
-        eprintln!("Error: This program must be run as root (use sudo)");
+        eprintln!("Must be run as root.");
         std::process::exit(1);
     }
 
@@ -194,92 +198,50 @@ fn main() {
     let devices = match get_all_disk_devices() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("Failed to get disk devices: {}", e);
+            eprintln!("Failed to get devices: {e}");
             std::process::exit(1);
         }
     };
 
-    if devices.is_empty() {
-        eprintln!("No disk devices found.");
-        return;
-    }
-
-    println!("Detected disk devices:\n");
+    // println!("Disk devices:");
 
     // 并行处理每个设备，获取厂商名、硬盘型号和温度
     let results: Vec<_> = devices
         .par_iter()
-        .map(|device| {
-            match get_disk_info_and_temperature(device) {
-                Ok((vendor, model, temp)) => (
-                    device.to_string(),
-                    vendor,
-                    model,
-                    temp.map_or("N/A".to_string(), |t| format!("{:3}°C", t)),
-                    "OK".to_string(),
-                ),
-                Err(e) => {
-                    // 尝试直接运行 smartctl 获取原始输出用于调试
-                    let raw_output = Command::new("smartctl")
-                        .arg("-a")
-                        .arg(device)
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                        .unwrap_or_else(|_| "Failed to get raw output".to_string());
-
-                    eprintln!("Debug raw output for {}:\n{}", device, raw_output);
-
-                    (
-                        device.to_string(),
-                        "Failed".to_string(),
-                        "Failed".to_string(),
-                        e.to_string(),
-                        "FAIL".to_string(),
-                    )
-                }
-            }
+        .map(|device| match get_disk_info_and_temperature(device) {
+            Ok((vendor, model, temp)) => (
+                device.to_string(),
+                vendor,
+                model,
+                temp.map_or("N/A".to_string(), |t| format!("{t}°C")),
+                "OK".to_string(),
+            ),
+            Err(e) => (
+                device.to_string(),
+                "Failed".to_string(),
+                "Failed".to_string(),
+                e.to_string(),
+                "FAIL".to_string(),
+            ),
         })
         .collect();
 
-    // 计算每列的最大宽度
-    let (max_device_len, max_vendor_len, max_model_len, max_temp_len) = results.iter().fold(
-        (0, 0, 0, 0),
-        |(d_max, v_max, m_max, t_max), (d, v, m, t, _)| {
-            (
-                d_max.max(d.len()),
-                v_max.max(v.len()),
-                m_max.max(m.len()),
-                t_max.max(t.len()),
-            )
-        },
+    let mut table = Table::new();
+    table.set_format(
+        format::FormatBuilder::new()
+            .padding(2, 2) // 设置左右填充空格
+            .build(),
     );
-
-    // 打印表头
-    println!(
-        "{:<device_width$} {:<vendor_width$} {:<model_width$} {:<temp_width$} STATUS",
-        "DEVICE",
-        "VENDOR",
-        "MODEL",
-        "TEMP",
-        device_width = max_device_len,
-        vendor_width = max_vendor_len,
-        model_width = max_model_len,
-        temp_width = max_temp_len,
-    );
-
-    // 打印结果并对齐
+    table.add_row(row!["DEVICE", "VENDOR", "MODEL", "TEMP", "STATUS"]);
     for (device, vendor, model, temp, status) in results {
-        println!(
-            "{:<device_width$} {:<vendor_width$} {:<model_width$} {:<temp_width$} {}",
-            device,
-            vendor,
-            model,
-            temp,
-            status,
-            device_width = max_device_len,
-            vendor_width = max_vendor_len,
-            model_width = max_model_len,
-            temp_width = max_temp_len,
-        );
+        table.add_row(Row::new(vec![
+            Cell::new(&device),
+            Cell::new(&vendor),
+            Cell::new(&model),
+            Cell::new(&temp),
+            Cell::new(&status),
+        ]));
     }
+
+    table.printstd();
 }
